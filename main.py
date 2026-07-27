@@ -2,7 +2,7 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from usd import get_usd_rate
 
-BOT_TOKEN = "8137205406:AAFdmX1gOStU4s4oUP9WQxSS3CU90OJ90RQ" # O'z tokeningizni yozing
+BOT_TOKEN = "8764824134:AAHwno-FSHv2y0HMPizkU5BwG_tGna4HcCc" # O'z tokeningizni yozing
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # Foydalanuvchining joriy USD miqdorini saqlash uchun baza
