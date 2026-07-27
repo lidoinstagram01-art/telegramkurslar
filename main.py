@@ -7,7 +7,7 @@ from telebot.types import (
 )
 from usd import get_all_usd_rates
 
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+BOT_TOKEN = "8137205406:AAFdmX1gOStU4s4oUP9WQxSS3CU90OJ90RQ"
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # Foydalanuvchilar tanlagan miqdor (default: 1 dollar)
