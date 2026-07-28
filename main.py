@@ -1,208 +1,163 @@
 import asyncio
-import random
-import requests
+import os
+import threading
 from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
-BOT_TOKEN = "8137205406:AAFdmX1gOStU4s4oUP9WQxSS3CU90OJ90RQ"
+# Render Environment Variable-dan token olish (xavfsiz usul)
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8137205406:AAFdmX1gOStU4s4oUP9WQxSS3CU90OJ90RQ")
 
-def get_gold_data():
+# --- RENDER PORT HEALTH CHECK (Render o'chirib qo'ymasligi uchun) ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot ishlamoqda!")
+
+    def log_message(self, format, *args):
+        return # Konsolga keraksiz loglarni chiqarmaslik
+
+def start_dummy_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
+# Background oqimda portni tinglashni boshlash
+threading.Thread(target=start_dummy_server, daemon=True).start()
+# --------------------------------------------------------------------
+
+def get_market_data():
     try:
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
+        url_price = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=30m"
         headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=5)
+        r = requests.get(url_price, headers=headers, timeout=5)
         data = r.json()
+        
         result = data["chart"]["result"][0]
         price = round(float(result["meta"]["regularMarketPrice"]), 2)
-        prev = round(float(result["meta"]["previousClose"]), 2)
-        return price, prev
-    except:
-        return None, None
-
-def get_gold_history():
-    try:
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=30m"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=5)
-        data = r.json()
-        closes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        
+        closes = result["indicators"]["quote"][0]["close"]
         closes = [c for c in closes if c is not None]
-        return closes
-    except:
-        return []
+        
+        return price, closes
+    except Exception:
+        return None, []
 
-def make_prediction():
-    closes = get_gold_history()
+def calculate_rsi(prices, period=14):
+    if len(prices) < period + 1: return 50
+    gains, losses = [], []
+    for i in range(1, len(prices)):
+        diff = prices[i] - prices[i-1]
+        if diff > 0: gains.append(diff)
+        else: losses.append(abs(diff))
 
-    if len(closes) >= 10:
-        last = closes[-1]
-        prev5 = closes[-6]
-        prev10 = closes[-11] if len(closes) >= 11 else closes[0]
+    avg_gain = sum(gains[-period:]) / period if gains else 0
+    avg_loss = sum(losses[-period:]) / period if losses else 0
 
-        trend1 = last - prev5        # 5 daqiqa trend
-        trend2 = last - prev10       # 10 daqiqa trend
+    if avg_loss == 0: return 100
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
-        high = max(closes[-10:])
-        low = min(closes[-10:])
-        rng = high - low if high != low else 0.01
-        rsi_like = (last - low) / rng * 100
+def calculate_sma(prices, period):
+    if len(prices) < period: return sum(prices)/len(prices)
+    return sum(prices[-period:]) / period
 
-        # Yuqori ishonch — trend + RSI bir tomonga
-        if trend1 > 0.3 and trend2 > 0.5 and rsi_like < 70:
-            direction = "up"
-            confidence = round(random.uniform(78, 91), 1)
+def make_real_prediction(closes):
+    if len(closes) < 15:
+        return "neutral", 50, 0.0, "Yetarli ma'lumot yo'q"
 
-        elif trend1 < -0.3 and trend2 < -0.5 and rsi_like > 30:
-            direction = "down"
-            confidence = round(random.uniform(78, 91), 1)
+    last_price = closes[-1]
+    rsi = calculate_rsi(closes)
+    sma5 = calculate_sma(closes, 5)
+    sma15 = calculate_sma(closes, 15)
 
-        elif trend1 > 0.1 and rsi_like < 60:
-            direction = "up"
-            confidence = round(random.uniform(64, 77), 1)
+    diffs = [abs(closes[i] - closes[i-1]) for i in range(len(closes)-5, len(closes))]
+    avg_diff = sum(diffs) / len(diffs)
+    expected_change_pct = (avg_diff / last_price) * 100
 
-        elif trend1 < -0.1 and rsi_like > 40:
-            direction = "down"
-            confidence = round(random.uniform(64, 77), 1)
-
+    if sma5 > sma15:
+        if rsi < 30:
+            direction, confidence, reason = "up", 85 + (30 - rsi), "Kuchli o'sish (RSI past)"
+        elif rsi > 70:
+            direction, confidence, reason = "down", 75 + (rsi - 70), "Tushish ehtimoli (Haddan ortiq olingan)"
         else:
-            direction = random.choice(["up", "down"])
-            confidence = round(random.uniform(55, 65), 1)
-
-        change_pct = round(random.uniform(0.03, 0.18), 2)
-        return direction, confidence, change_pct
-
-    # History yo'q bo'lsa fallback
-    direction = random.choice(["up", "down"])
-    confidence = round(random.uniform(58, 72), 1)
-    change_pct = round(random.uniform(0.03, 0.15), 2)
-    return direction, confidence, change_pct
-
-def build_message(price, prev, direction, confidence, change_pct):
-    now = datetime.now().strftime("%H:%M:%S")
-
-    if prev:
-        day_change = round(price - prev, 2)
-        day_pct = round((day_change / prev) * 100, 2)
-        sign = "+" if day_change >= 0 else ""
-        day_line = f"📅 Kunlik: *{sign}{day_change}$ ({sign}{day_pct}%)*\n"
+            direction, confidence, reason = "up", 55 + (70 - rsi) / 2, "Barqaror o'sish trendi"
     else:
-        day_line = ""
+        if rsi > 70:
+            direction, confidence, reason = "down", 85 + (rsi - 70), "Kuchli tushish (RSI yuqori)"
+        elif rsi < 30:
+            direction, confidence, reason = "up", 75 + (30 - rsi), "O'sish ehtimoli (Haddan ortiq sotilgan)"
+        else:
+            direction, confidence, reason = "down", 55 + (rsi - 30) / 2, "Barqaror tushish trendi"
+
+    confidence = min(max(int(confidence), 10), 95)
+    return direction, confidence, expected_change_pct, reason
+
+def build_compact_message(price, direction, confidence, change_pct, reason):
+    now = datetime.now().strftime("%H:%M")
 
     if direction == "up":
-        emoji = "📈"
-        label = "OSHADI"
-        sign = "+"
-        expected = round(price * (1 + change_pct / 100), 2)
+        emoji, label = "📈", "OSHISHI KUTILMOQDA"
+        target = price + (price * change_pct / 100)
     else:
-        emoji = "📉"
-        label = "TUSHADI"
-        sign = "-"
-        expected = round(price * (1 - change_pct / 100), 2)
+        emoji, label = "📉", "TUSHISHI KUTILMOQDA"
+        target = price - (price * change_pct / 100)
 
     filled = int(confidence / 10)
     bar = "█" * filled + "░" * (10 - filled)
 
-    if confidence >= 78:
-        strength = "🔥 Kuchli signal"
-    elif confidence >= 64:
-        strength = "✅ O'rtacha signal"
-    else:
-        strength = "⚡ Zaif signal"
-
     msg = (
-        f"📊 *OLTIN BASHORATI — XAU/USD*\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"💰 Narx: *${price:,.2f}*\n"
-        f"{day_line}"
-        f"🕐 Vaqt: {now}\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"{emoji} *1 DAQIQADA {label}!*\n\n"
-        f"📐 Ishonch: `[{bar}]` *{confidence}%*\n"
-        f"{strength}\n\n"
-        f"🎯 Kutilayotgan: *${expected:,.2f}*\n"
-        f"📏 O'zgarish: *{sign}{change_pct}%*\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"⚠️ _Bashorat — kafolat emas!_"
+        f"📊 *XAU/USD (Oltin)* | 🕒 {now}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"💰 *Joriy narx:* ${price:,.2f}\n"
+        f"🎯 *Kutilayotgan narx:* ${target:,.2f}\n\n"
+        f"{emoji} *Signal:* {label}\n"
+        f"📌 *Sabab:* {reason}\n"
+        f"📐 *Ishonch:* `[{bar}]` {confidence}%\n"
+        f"━━━━━━━━━━━━━━━"
     )
     return msg
 
-async def run_prediction(send_func, edit_func=None):
-    price, prev = get_gold_data()
+async def send_or_update_prediction(update: Update, message_obj, is_edit=False):
+    price, closes = get_market_data()
 
     if price is None:
-        text = "❌ Internet yoki API xatosi. Qayta urinib ko'ring."
-        if edit_func:
-            await edit_func(text)
+        text = "❌ *Xatolik:* Birja ma'lumotlarini olib bo'lmadi."
+        if is_edit:
+            await message_obj.edit_text(text, parse_mode="Markdown")
         else:
-            await send_func(text)
+            await message_obj.reply_text(text, parse_mode="Markdown")
         return
 
-    now = datetime.now().strftime("%H:%M:%S")
+    direction, confidence, change_pct, reason = make_real_prediction(closes)
+    msg = build_compact_message(price, direction, confidence, change_pct, reason)
+    keyboard = [[InlineKeyboardButton("🔄 Yangilash", callback_data="new_forecast")]]
 
-    loading = await send_func(
-        f"📊 *OLTIN NARXI (XAU/USD)*\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"💰 Joriy narx: *${price:,.2f}*\n"
-        f"🕐 {now}\n\n"
-        f"⏳ Trend tahlil qilinmoqda...",
-        parse_mode="Markdown"
-    )
-
-    await asyncio.sleep(2)
-
-    direction, confidence, change_pct = make_prediction()
-    msg = build_message(price, prev, direction, confidence, change_pct)
-
-    keyboard = [[InlineKeyboardButton("🔄 Yangi bashorat", callback_data="new")]]
-
-    await loading.edit_text(
-        msg,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    try:
+        if is_edit:
+            await message_obj.edit_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            await message_obj.reply_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception:
+        pass
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_prediction(update.message.reply_text)
+    await send_or_update_prediction(update, update.message, is_edit=False)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
-    price, prev = get_gold_data()
-    if price is None:
-        await query.message.edit_text("❌ Internet yoki API xatosi.")
-        return
-
-    now = datetime.now().strftime("%H:%M:%S")
-
-    await query.message.edit_text(
-        f"📊 *OLTIN NARXI (XAU/USD)*\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"💰 Joriy narx: *${price:,.2f}*\n"
-        f"🕐 {now}\n\n"
-        f"⏳ Trend tahlil qilinmoqda...",
-        parse_mode="Markdown"
-    )
-
-    await asyncio.sleep(2)
-
-    direction, confidence, change_pct = make_prediction()
-    msg = build_message(price, prev, direction, confidence, change_pct)
-
-    keyboard = [[InlineKeyboardButton("🔄 Yangi bashorat", callback_data="new")]]
-
-    await query.message.edit_text(
-        msg,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await send_or_update_prediction(update, query.message, is_edit=True)
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    print("✅ Bot ishga tushdi...")
+    app.add_handler(CallbackQueryHandler(button_handler, pattern="new_forecast"))
+    
+    print("✅ Bot va Web Server ishga tushdi...")
     app.run_polling()
 
 if __name__ == "__main__":
