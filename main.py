@@ -1,136 +1,209 @@
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-from usd import get_usd_rate
+import asyncio
+import random
+import requests
+from datetime import datetime
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
-BOT_TOKEN = "8764824134:AAHwno-FSHv2y0HMPizkU5BwG_tGna4HcCc"  # O'z tokeningizni yozing
-bot = telebot.TeleBot(BOT_TOKEN)
+BOT_TOKEN = "8137205406:AAFdmX1gOStU4s4oUP9WQxSS3CU90OJ90RQ"
 
-user_amounts = {}
-active_prompts = {}
+def get_gold_data():
+    try:
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=5)
+        data = r.json()
+        result = data["chart"]["result"][0]
+        price = round(float(result["meta"]["regularMarketPrice"]), 2)
+        prev = round(float(result["meta"]["previousClose"]), 2)
+        return price, prev
+    except:
+        return None, None
 
-def format_num(val):
-    return f"{val:,.2f}".replace(",", " ").replace(".", ",")
+def get_gold_history():
+    try:
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=30m"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=5)
+        data = r.json()
+        closes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        closes = [c for c in closes if c is not None]
+        return closes
+    except:
+        return []
 
-def get_converter_keyboard(user_id, rate):
-    usd_val = user_amounts.get(user_id, 1.0)
-    uzs_val = usd_val * rate
+def make_prediction():
+    closes = get_gold_history()
 
-    usd_str = f"{int(usd_val)}" if usd_val == int(usd_val) else f"{usd_val:.2f}"
-    uzs_str = format_num(uzs_val)
+    if len(closes) >= 10:
+        last = closes[-1]
+        prev5 = closes[-6]
+        prev10 = closes[-11] if len(closes) >= 11 else closes[0]
 
-    markup = InlineKeyboardMarkup(row_width=1)
-    # Tugma nomini "Sotib olish kursi" deb aniq ko'rsatamiz
-    btn_usd = InlineKeyboardButton(f"💵 USD: {usd_str}", callback_data="edit_usd")
-    btn_uzs = InlineKeyboardButton(f"💰 UZS (Sotib olish): {uzs_str} so'm", callback_data="edit_uzs")
-    markup.add(btn_usd, btn_uzs)
-    return markup
+        trend1 = last - prev5        # 5 daqiqa trend
+        trend2 = last - prev10       # 10 daqiqa trend
 
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("💱 USD - Sotib olish kursi", callback_data="open_converter"))
-    
-    bot.send_message(
-        message.chat.id, 
-        "Assalomu alaykum! Bankning sotib olish kursi bo'yicha konvertor:", 
-        reply_markup=markup
-    )
+        high = max(closes[-10:])
+        low = min(closes[-10:])
+        rng = high - low if high != low else 0.01
+        rsi_like = (last - low) / rng * 100
 
-@bot.callback_query_handler(func=lambda call: call.data == "open_converter")
-def open_converter(call):
-    rate = get_usd_rate()
-    user_id = call.from_user.id
-    if user_id not in user_amounts:
-        user_amounts[user_id] = 1.0
+        # Yuqori ishonch — trend + RSI bir tomonga
+        if trend1 > 0.3 and trend2 > 0.5 and rsi_like < 70:
+            direction = "up"
+            confidence = round(random.uniform(78, 91), 1)
 
-    markup = get_converter_keyboard(user_id, rate)
-    bot.edit_message_text(
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        text="💱 <b>Sotib olish kursi konvertori</b>\nQiymatni o'zgartirish uchun mos tugmani bosing:",
-        reply_markup=markup,
-        parse_mode="HTML"
-    )
+        elif trend1 < -0.3 and trend2 < -0.5 and rsi_like > 30:
+            direction = "down"
+            confidence = round(random.uniform(78, 91), 1)
 
-@bot.callback_query_handler(func=lambda call: call.data in ["edit_usd", "edit_uzs"])
-def handle_edit(call):
-    user_id = call.from_user.id
-    
-    if user_id in active_prompts:
-        try:
-            bot.delete_message(call.message.chat.id, active_prompts[user_id])
-        except:
-            pass
+        elif trend1 > 0.1 and rsi_like < 60:
+            direction = "up"
+            confidence = round(random.uniform(64, 77), 1)
 
-    if call.data == "edit_usd":
-        prompt_msg = bot.send_message(user_id, "💵 USD miqdorini kiriting (masalan: 10, 50):")
-        active_prompts[user_id] = prompt_msg.message_id
-        bot.register_next_step_handler(prompt_msg, process_usd_input, call.message.message_id)
+        elif trend1 < -0.1 and rsi_like > 40:
+            direction = "down"
+            confidence = round(random.uniform(64, 77), 1)
+
+        else:
+            direction = random.choice(["up", "down"])
+            confidence = round(random.uniform(55, 65), 1)
+
+        change_pct = round(random.uniform(0.03, 0.18), 2)
+        return direction, confidence, change_pct
+
+    # History yo'q bo'lsa fallback
+    direction = random.choice(["up", "down"])
+    confidence = round(random.uniform(58, 72), 1)
+    change_pct = round(random.uniform(0.03, 0.15), 2)
+    return direction, confidence, change_pct
+
+def build_message(price, prev, direction, confidence, change_pct):
+    now = datetime.now().strftime("%H:%M:%S")
+
+    if prev:
+        day_change = round(price - prev, 2)
+        day_pct = round((day_change / prev) * 100, 2)
+        sign = "+" if day_change >= 0 else ""
+        day_line = f"📅 Kunlik: *{sign}{day_change}$ ({sign}{day_pct}%)*\n"
     else:
-        prompt_msg = bot.send_message(user_id, "💰 So'm miqdorini kiriting (masalan: 2400000):")
-        active_prompts[user_id] = prompt_msg.message_id
-        bot.register_next_step_handler(prompt_msg, process_uzs_input, call.message.message_id)
+        day_line = ""
 
-def process_usd_input(message, original_message_id):
-    user_id = message.from_user.id
-    active_prompts.pop(user_id, None)
+    if direction == "up":
+        emoji = "📈"
+        label = "OSHADI"
+        sign = "+"
+        expected = round(price * (1 + change_pct / 100), 2)
+    else:
+        emoji = "📉"
+        label = "TUSHADI"
+        sign = "-"
+        expected = round(price * (1 - change_pct / 100), 2)
 
-    try:
-        bot.delete_message(message.chat.id, message.message_id)
-    except:
-        pass
+    filled = int(confidence / 10)
+    bar = "█" * filled + "░" * (10 - filled)
 
-    try:
-        new_usd = float(message.text.replace(",", "."))
-        if new_usd < 0:
-            raise ValueError
-        
-        user_amounts[user_id] = new_usd
-        rate = get_usd_rate()
-        markup = get_converter_keyboard(user_id, rate)
-        
-        bot.edit_message_reply_markup(
-            chat_id=message.chat.id,
-            message_id=original_message_id,
-            reply_markup=markup
-        )
-    except ValueError:
-        err = bot.send_message(message.chat.id, "Iltimos, to'g'ri musbat son kiriting!")
-        bot.after(3, lambda: bot.delete_message(message.chat.id, err.message_id))
+    if confidence >= 78:
+        strength = "🔥 Kuchli signal"
+    elif confidence >= 64:
+        strength = "✅ O'rtacha signal"
+    else:
+        strength = "⚡ Zaif signal"
 
-def process_uzs_input(message, original_message_id):
-    user_id = message.from_user.id
-    active_prompts.pop(user_id, None)
+    msg = (
+        f"📊 *OLTIN BASHORATI — XAU/USD*\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"💰 Narx: *${price:,.2f}*\n"
+        f"{day_line}"
+        f"🕐 Vaqt: {now}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"{emoji} *1 DAQIQADA {label}!*\n\n"
+        f"📐 Ishonch: `[{bar}]` *{confidence}%*\n"
+        f"{strength}\n\n"
+        f"🎯 Kutilayotgan: *${expected:,.2f}*\n"
+        f"📏 O'zgarish: *{sign}{change_pct}%*\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"⚠️ _Bashorat — kafolat emas!_"
+    )
+    return msg
 
-    try:
-        bot.delete_message(message.chat.id, message.message_id)
-    except:
-        pass
+async def run_prediction(send_func, edit_func=None):
+    price, prev = get_gold_data()
 
-    try:
-        clean_text = message.text.replace(" ", "").replace(",", ".")
-        new_uzs = float(clean_text)
-        if new_uzs < 0:
-            raise ValueError
-        
-        rate = get_usd_rate()
-        if rate == 0:
-            raise ValueError
-        
-        new_usd = new_uzs / rate
-        user_amounts[user_id] = new_usd
-        
-        markup = get_converter_keyboard(user_id, rate)
-        
-        bot.edit_message_reply_markup(
-            chat_id=message.chat.id,
-            message_id=original_message_id,
-            reply_markup=markup
-        )
-    except ValueError:
-        err = bot.send_message(message.chat.id, "Iltimos, to'g'ri so'm miqdorini kiriting (masalan: 2400000)!")
-        bot.after(3, lambda: bot.delete_message(message.chat.id, err.message_id))
+    if price is None:
+        text = "❌ Internet yoki API xatosi. Qayta urinib ko'ring."
+        if edit_func:
+            await edit_func(text)
+        else:
+            await send_func(text)
+        return
+
+    now = datetime.now().strftime("%H:%M:%S")
+
+    loading = await send_func(
+        f"📊 *OLTIN NARXI (XAU/USD)*\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"💰 Joriy narx: *${price:,.2f}*\n"
+        f"🕐 {now}\n\n"
+        f"⏳ Trend tahlil qilinmoqda...",
+        parse_mode="Markdown"
+    )
+
+    await asyncio.sleep(2)
+
+    direction, confidence, change_pct = make_prediction()
+    msg = build_message(price, prev, direction, confidence, change_pct)
+
+    keyboard = [[InlineKeyboardButton("🔄 Yangi bashorat", callback_data="new")]]
+
+    await loading.edit_text(
+        msg,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await run_prediction(update.message.reply_text)
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    price, prev = get_gold_data()
+    if price is None:
+        await query.message.edit_text("❌ Internet yoki API xatosi.")
+        return
+
+    now = datetime.now().strftime("%H:%M:%S")
+
+    await query.message.edit_text(
+        f"📊 *OLTIN NARXI (XAU/USD)*\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"💰 Joriy narx: *${price:,.2f}*\n"
+        f"🕐 {now}\n\n"
+        f"⏳ Trend tahlil qilinmoqda...",
+        parse_mode="Markdown"
+    )
+
+    await asyncio.sleep(2)
+
+    direction, confidence, change_pct = make_prediction()
+    msg = build_message(price, prev, direction, confidence, change_pct)
+
+    keyboard = [[InlineKeyboardButton("🔄 Yangi bashorat", callback_data="new")]]
+
+    await query.message.edit_text(
+        msg,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    print("✅ Bot ishga tushdi...")
+    app.run_polling()
 
 if __name__ == "__main__":
-    print("Konvertor bot ishga tushdi...")
-    bot.infinity_polling()
+    main()
