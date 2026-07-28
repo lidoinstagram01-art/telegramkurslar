@@ -8,7 +8,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # Token (Render Environment Variable dan oladi, bo'lmasa pastdagini ishlatadi)
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8137205406:AAFdmX1gOStU4s4oUP9WQxSS3CU90OJ90RQ")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8943373950:AAE59hFM95gGgdmzMwX0EETJUeeUSQXIJBw")
 
 # =====================================================================
 # 1. RENDER SERVER UCHUN "DUMMY" PORT TINGLOVCHI
