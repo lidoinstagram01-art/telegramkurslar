@@ -7,53 +7,72 @@ import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# Render Environment Variable yoki standart token
+# Token (Render Environment Variable dan oladi, bo'lmasa pastdagini ishlatadi)
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8137205406:AAFdmX1gOStU4s4oUP9WQxSS3CU90OJ90RQ")
 
 # =====================================================================
-# RENDER DUMMY SERVER (Render o'chirib qo'ymasligi uchun)
+# 1. RENDER SERVER UCHUN "DUMMY" PORT TINGLOVCHI
 # =====================================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Real-time Bot is running!")
+        self.wfile.write(b"Real-time Gold Bot is running!")
 
     def log_message(self, format, *args):
-        return
+        return  # Konsolga keraksiz loglar chiqarmaslik uchun
 
 def start_dummy_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
+# Orqa fonda portni tinglashni boshlash
 threading.Thread(target=start_dummy_server, daemon=True).start()
 
 # =====================================================================
-# REAL-TIME BIRJA MA'LUMOTLARI (0-DELAY REAL SPOT GOLD)
+# 2. BIRJA MA'LUMOTLARI (REAL-TIME SPOT GOLD - 0 DELAY)
 # =====================================================================
 def get_market_data():
     """
-    Binance API orqali Real-Time Spot Oltin (PAXGUSDT) narxini olish.
-    Kechikish (delay): 0 soniya (XM bilan bir xil real vaqtda ishlaydi).
+    Real-Time Spot Oltin (PAXGUSDT) narxi (Render serverlari uchun bloklanmaydigan versiya).
+    1-Manba: Binance Vision
+    2-Manba (Zaxira): Coinbase Global API
     """
-    try:
-        # PAXGUSDT - London Good Delivery physical gold (1:1 XAU/USD Spot)
-        url = "https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=1m&limit=30"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=4)
-        data = r.json()
-        
-        # 1-daqiqalik shamchalarning yopilish narxlari (Close prices)
-        closes = [float(candle[4]) for candle in data]
-        price = round(closes[-1], 2)
-        
-        return price, closes
-    except Exception:
-        return None, []
+    headers = {"User-Agent": "Mozilla/5.0"}
 
+    # 1. BIRINCHI MANBA (Binance Vision)
+    try:
+        url = "https://data-api.binance.vision/api/v3/klines?symbol=PAXGUSDT&interval=1m&limit=30"
+        r = requests.get(url, headers=headers, timeout=3)
+        if r.status_code == 200:
+            data = r.json()
+            closes = [float(candle[4]) for candle in data]
+            if closes:
+                return round(closes[-1], 2), closes
+    except Exception:
+        pass  # Xatolik bo'lsa zaxiraga o'tadi
+
+    # 2. ZAXIRA MANBASI (Coinbase)
+    try:
+        url = "https://api.exchange.coinbase.com/products/PAXG-USD/candles?granularity=60"
+        r = requests.get(url, headers=headers, timeout=3)
+        if r.status_code == 200:
+            data = r.json()
+            # Coinbase eng yangi vaqtni 0-indeksda beradi, shuning uchun tartiblaymiz
+            data = sorted(data[:30], key=lambda x: x[0])
+            closes = [float(candle[4]) for candle in data]
+            if closes:
+                return round(closes[-1], 2), closes
+    except Exception:
+        pass
+
+    return None, []
+
+# =====================================================================
+# 3. TEXNIK TAHLIL VA INDIKATORLAR (TA)
+# =====================================================================
 def calculate_rsi(prices, period=14):
-    """RSI (Relative Strength Index) hisoblash"""
     if len(prices) < period + 1:
         return 50
     gains, losses = [], []
@@ -73,13 +92,12 @@ def calculate_rsi(prices, period=14):
     return 100 - (100 / (1 + rs))
 
 def calculate_sma(prices, period):
-    """SMA (Simple Moving Average) hisoblash"""
     if len(prices) < period:
         return sum(prices) / len(prices)
     return sum(prices[-period:]) / period
 
 def make_real_prediction(closes):
-    """Real vaqtdagi 1-daqiqalik narx harakatlari tahlili"""
+    """Impuls va Volatillik (ATR) filtri asosidagi tahlil"""
     if len(closes) < 15:
         return "flat", 0, 0.0, "Yetarli ma'lumot yo'q"
 
@@ -88,50 +106,38 @@ def make_real_prediction(closes):
     sma5 = calculate_sma(closes, 5)
     sma15 = calculate_sma(closes, 15)
 
-    # So'nggi 10 daqiqadagi 1m shamlarning real tebranish kuchi (Volatillik)
+    # O'rtacha 1 minutlik harakat amplitudasi (ATR analogi)
     ranges = [abs(closes[i] - closes[i-1]) for i in range(len(closes)-10, len(closes))]
     avg_range = sum(ranges) / len(ranges)
 
-    # 1. Volatillik filtri: Agar 1 minutlik o'rtacha tebranish $0.20 dan kam bo'lsa - Flat
+    # BOZOR SUSTLIK FILTRI: Harakat $0.20 dan kam bo'lsa
     if avg_range < 0.20:
         return "flat", 0, round(avg_range, 2), "Bozor juda tinch (Flat). Kirish xavfli!"
 
-    # 2. Impuls kutilmasini hisoblash (kamida $0.40 - $1.50+)
+    # Maqsad (Target) o'rnatish
     expected_move_usd = max(avg_range * 1.6, 0.45)
     expected_change_pct = (expected_move_usd / last_price) * 100
 
-    # 3. Trend va RSI bo'yicha signal berish
-    if sma5 > sma15: # O'sish trendi
+    # Trend va RSI Signallari
+    if sma5 > sma15: # Uptrend
         if rsi < 35:
-            direction = "up"
-            confidence = 88
-            reason = f"Kuchli impuls! O'sish kutilmoqda (~${expected_move_usd:.2f})"
+            direction, confidence, reason = "up", 88, f"Kuchli impuls! O'sish kutilmoqda (~${expected_move_usd:.2f})"
         elif rsi > 70:
-            direction = "down"
-            confidence = 72
-            reason = f"Tushish korreksiyasi kutilmoqda (~${expected_move_usd:.2f})"
+            direction, confidence, reason = "down", 72, f"Tushish korreksiyasi kutilmoqda (~${expected_move_usd:.2f})"
         else:
-            direction = "up"
-            confidence = 66
-            reason = f"O'sish trendi davom etmoqda (~${expected_move_usd:.2f})"
-    else: # Tushish trendi
+            direction, confidence, reason = "up", 66, f"O'sish trendi davom etmoqda (~${expected_move_usd:.2f})"
+    else: # Downtrend
         if rsi > 65:
-            direction = "down"
-            confidence = 88
-            reason = f"Kuchli impuls! Tushish kutilmoqda (~${expected_move_usd:.2f})"
+            direction, confidence, reason = "down", 88, f"Kuchli impuls! Tushish kutilmoqda (~${expected_move_usd:.2f})"
         elif rsi < 30:
-            direction = "up"
-            confidence = 72
-            reason = f"O'sish korreksiyasi kutilmoqda (~${expected_move_usd:.2f})"
+            direction, confidence, reason = "up", 72, f"O'sish korreksiyasi kutilmoqda (~${expected_move_usd:.2f})"
         else:
-            direction = "down"
-            confidence = 66
-            reason = f"Tushish trendi davom etmoqda (~${expected_move_usd:.2f})"
+            direction, confidence, reason = "down", 66, f"Tushish trendi davom etmoqda (~${expected_move_usd:.2f})"
 
     return direction, confidence, expected_change_pct, reason
 
 # =====================================================================
-# XABAR FORMATI
+# 4. XABAR YARATISH (UI/UX)
 # =====================================================================
 def build_compact_message(price, direction, confidence, change_pct, reason):
     now = datetime.now().strftime("%H:%M:%S")
@@ -164,7 +170,7 @@ def build_compact_message(price, direction, confidence, change_pct, reason):
     return msg
 
 # =====================================================================
-# TELEGRAM BOT HANDLERLARI
+# 5. TELEGRAM BOT FUNKSIYALARI
 # =====================================================================
 async def send_or_update_prediction(update: Update, message_obj, is_edit=False):
     price, closes = get_market_data()
@@ -187,7 +193,7 @@ async def send_or_update_prediction(update: Update, message_obj, is_edit=False):
         else:
             await message_obj.reply_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception:
-        pass
+        pass # Ma'lumot bir xil bo'lsa xato chiqarmaydi
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_or_update_prediction(update, update.message, is_edit=False)
@@ -198,7 +204,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_or_update_prediction(update, query.message, is_edit=True)
 
 # =====================================================================
-# ISHGA TUSHIRISH
+# ASOSIY START
 # =====================================================================
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
